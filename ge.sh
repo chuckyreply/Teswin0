@@ -1,85 +1,103 @@
 #!/bin/bash
-# ===============================================
-# 🪟 Auto Windows Installer (QEMU + VNC)
-# Compatible with Ubuntu/Debian (Contabo VPS)
-# Author: ChatGPT
-# ===============================================
+# ====================================================
+# Windows Installer via QEMU + noVNC (Full Auto Script)
+# Tested on Ubuntu 22.04 at Contabo VPS (No KVM)
+# ====================================================
 
+ISO_URL="https://archive.org/download/windows-server-2012-r2/Windows_Server_2012_R2.ISO"
 ISO_PATH="/root/windows.iso"
 DISK_PATH="/var/lib/libvirt/images/windows.qcow2"
-DISK_SIZE="40G"
-RAM_SIZE="4096"   # 4GB RAM
-CPU_CORES="2"
+RAM_SIZE="4096"          # 4GB
+VNC_PORT="1"             # :1 = 5901
+NOVNC_PORT="6080"
 
-# Acak port antara 5901-5999
-VNC_PORT_NUM=$((RANDOM % 99 + 1))
-VNC_PORT=":$VNC_PORT_NUM"
-VNC_DISPLAY=$((5900 + VNC_PORT_NUM))
+# --- Banner ---
+echo "==============================================="
+echo "🪟 Windows Installer via QEMU + noVNC"
+echo "==============================================="
 
-# --- Link ISO Windows Server 2012 R2 ---
-ISO_URL="https://software-static.download.prss.microsoft.com/pr/download/Windows_Server_2012_R2_EVAL_EN-US.ISO"
+# --- Update & install dependencies ---
+echo "[*] Menginstall dependensi..."
+apt update -y
+apt install -y qemu qemu-system-x86 qemu-utils novnc websockify wget
 
-# --- Cek apakah ISO sudah ada ---
+# --- Cek ISO ---
 if [ ! -f "$ISO_PATH" ]; then
-  echo "🌐 Mengunduh Windows Server 2012 R2 ISO (~4.2GB)..."
-  wget -O "$ISO_PATH" "$ISO_URL"
+    echo "[*] File ISO belum ada, mengunduh dari sumber..."
+    wget -O "$ISO_PATH" "$ISO_URL"
 else
-  echo "✅ File ISO sudah ada di $ISO_PATH"
+    echo "[*] File ISO sudah ada. Memeriksa validitas..."
+    ISO_TYPE=$(file "$ISO_PATH" | grep -i "ISO 9660")
+    if [ -z "$ISO_TYPE" ]; then
+        echo "[!] File ISO rusak atau tidak valid. Mengunduh ulang..."
+        rm -f "$ISO_PATH"
+        wget -O "$ISO_PATH" "$ISO_URL"
+    else
+        echo "[OK] File ISO valid."
+    fi
 fi
 
-# --- Install dependencies ---
-echo "📦 Menginstall paket yang dibutuhkan..."
-apt update -y >/dev/null 2>&1
-apt install -y qemu qemu-utils libvirt-daemon-system bridge-utils virtinst virt-viewer >/dev/null 2>&1
-
-# --- Cek dukungan KVM ---
-echo "🔍 Mengecek dukungan KVM..."
-if [ -e /dev/kvm ]; then
-  echo "✅ KVM tersedia, menggunakan akselerasi hardware"
-  KVM_OPT="-enable-kvm"
-else
-  echo "⚠️  KVM tidak tersedia, menggunakan mode software (-no-kvm)"
-  KVM_OPT="-no-kvm"
-fi
-
-# --- Buat folder untuk disk ---
-mkdir -p /var/lib/libvirt/images
-
-# --- Buat virtual disk ---
+# --- Pastikan disk ada ---
 if [ ! -f "$DISK_PATH" ]; then
-  echo "💽 Membuat virtual disk sebesar $DISK_SIZE..."
-  qemu-img create -f qcow2 "$DISK_PATH" "$DISK_SIZE"
+    echo "[*] Membuat disk virtual 60GB..."
+    mkdir -p /var/lib/libvirt/images
+    qemu-img create -f qcow2 "$DISK_PATH" 60G
 else
-  echo "✅ Disk sudah ada di $DISK_PATH"
+    echo "[OK] Disk sudah ada di $DISK_PATH"
 fi
 
-# --- Tampilkan status resource ---
-echo ""
+# --- Cek RAM dan disk ---
 echo "📊 STATUS VPS:"
-echo "RAM TOTAL: $(free -h | awk '/Mem:/ {print $2}')"
-echo "RAM TERPAKAI: $(free -h | awk '/Mem:/ {print $3}')"
-echo "DISK ROOT: $(df -h / | awk 'NR==2 {print $2, \"used:\", $3, \"avail:\", $4}')"
-echo ""
+free -h | awk 'NR==2{print "RAM TOTAL:", $2, "| TERPAKAI:", $3}'
+df -h / | awk 'NR==2{print "DISK ROOT:", $2, "| TERPAKAI:", $3, "| TERSISA:", $4}'
+echo
 
-# --- Jalankan QEMU ---
+# --- Cek KVM ---
+if lsmod | grep -q kvm; then
+    echo "[OK] KVM aktif ✅"
+    KVM_OPT="-enable-kvm -cpu host"
+else
+    echo "[!] KVM tidak tersedia ❌ — menggunakan software mode (lebih lambat)"
+    KVM_OPT="-no-kvm -cpu qemu64"
+fi
+
+# --- Jalankan noVNC & QEMU ---
+IP=$(hostname -I | awk '{print $1}')
+echo
 echo "🚀 Menjalankan installer Windows..."
-IP_ADDR=$(hostname -I | awk '{print $1}')
-echo "Gunakan aplikasi VNC Viewer untuk mengakses:"
-echo "👉  ${IP_ADDR}:${VNC_DISPLAY}"
-echo ""
-echo "Tunggu 1-2 menit sampai layar instalasi Windows muncul."
-echo "Untuk menghentikan, tekan CTRL + C di terminal ini."
-echo ""
+echo "🌐 Akses di browser:  http://${IP}:${NOVNC_PORT}/vnc.html"
+echo "💻 Atau VNC client:   ${IP}:590${VNC_PORT}"
+echo "==============================================="
+echo
 
-qemu-system-x86_64 \
+# Hentikan proses lama
+pkill -9 qemu-system-x86_64 2>/dev/null
+pkill -9 websockify 2>/dev/null
+
+# Jalankan QEMU
+nohup qemu-system-x86_64 \
   $KVM_OPT \
-  -m "$RAM_SIZE" \
-  -cpu host \
-  -smp cores="$CPU_CORES" \
-  -hda "$DISK_PATH" \
+  -m $RAM_SIZE \
+  -smp 2 \
+  -drive file="$DISK_PATH",if=virtio \
   -cdrom "$ISO_PATH" \
   -boot d \
-  -vnc "$VNC_PORT" \
-  -name "WindowsInstaller" \
-  -machine type=pc,accel=tcg \
-  -net nic -net user
+  -vnc :$VNC_PORT \
+  -net nic -net user \
+  -rtc base=localtime \
+  -no-shutdown \
+  -no-reboot \
+  > /root/qemu.log 2>&1 &
+
+sleep 5
+
+# Jalankan noVNC
+nohup websockify --web=/usr/share/novnc/ ${NOVNC_PORT} localhost:590${VNC_PORT} > /root/novnc.log 2>&1 &
+
+sleep 3
+echo "✅ QEMU dan noVNC berhasil dijalankan!"
+echo "🌐 Buka: http://${IP}:${NOVNC_PORT}/vnc.html"
+echo
+echo "ℹ️ Jika masih 'No bootable device', jalankan ini untuk melihat log:"
+echo "   cat /root/qemu.log | tail -n 30"
+echo
